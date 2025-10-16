@@ -40,8 +40,6 @@ local function call_handler(handler, machine, params)
 end
 
 local function create_transition(name)
-    local onbefore, onafter, onevent = "onbefore" .. name, "onafter" .. name, "on" .. name
-    local waitingonleave, waitingonenter = name .. "WaitingOnLeave", name .. "WaitingOnEnter"
     local function transition(self, ...)
         local state = self._state
         if state.asyncState == NONE then
@@ -53,35 +51,35 @@ local function create_transition(name)
             state.params = { name, from, to, ...}
             state.currentTransitioningEvent = name
 
-            local beforeReturn = call_handler(self[onbefore], self, state.params)
+            local beforeReturn = call_handler(self["onbefore" .. name], self, state.params)
             local leaveReturn = call_handler(self["onleave" .. from], self, state.params)
 
             if beforeReturn == false or leaveReturn == false then
                 return false
             end
 
-            state.asyncState = waitingonleave
+            state.asyncState = name .. "WaitingOnLeave"
 
             if leaveReturn ~= ASYNC then
                 transition(self, ...)
             end
 
             return true
-        elseif state.asyncState == waitingonleave then
+        elseif state.asyncState == name .. "WaitingOnLeave" then
             local to = state.to
             state.current = to
 
             local enterReturn = call_handler(self["onenter" .. to], self, state.params)
 
-            state.asyncState = waitingonenter
+            state.asyncState = name .. "WaitingOnEnter"
 
             if enterReturn ~= ASYNC then
                 transition(self, ...)
             end
 
             return true
-        elseif state.asyncState == waitingonenter then
-            call_handler(self[onafter], self, state.params)
+        elseif state.asyncState == name .. "WaitingOnEnter" then
+            call_handler(self["onafter" .. name], self, state.params)
             call_handler(self["onstatechange"], self, state.params)
             state.asyncState = NONE
             state.currentTransitioningEvent = nil
@@ -101,6 +99,8 @@ local function create_transition(name)
     return transition
 end
 
+local allStates, haveWildcard
+
 function add_handler(t, info, handler, overwrite)
     local name = info
     if t[name] ~= nil and not overwrite then
@@ -116,12 +116,26 @@ function add_event_handler_names(t, name)
 end
 
 function add_from_handler_names(t, from)
-    t["onleave" .. from] = "onleave" .. from
+    if from == "*" then
+        haveWildcard = true
+    else
+        allStates[from] = true
+        t["onleave" .. from] = "onleave" .. from
+    end
 end
 
 function add_to_handler_names(t, to)
+    allStates[to] = true
     t["onenter" .. to] = "onenter" .. to
     t["on" .. to] = "onenter" .. to
+end
+
+function settle_wildcards(t)
+    if haveWildcard then
+        for k in pairs(allStates) do
+            t["onleave" .. k] = "onleave" .. k
+        end
+    end
 end
 
 local function add_to_map(map, callbacknames, event)
@@ -154,13 +168,15 @@ function machine.__newindex(t, k, v)
     if t._sealed then
         error("Cannot modify sealed object")
     end
-    local cbinfo = t._callbacks[k]
-    if cbinfo then
+    local name = t._callbacks[k]
+    if name then
         local valid, typ = is_callable_or_nil(v)
         if not valid then
             error("Unexpected handler: " .. k .. " type: " .. typ)
+        elseif t[name] ~= nil and not t._lax then
+            error("Attempted to overwrite event handler: " .. name)
         end
-	add_handler(t, cbinfo, v, t._lax)
+        rawset(t, name, v)
     elseif t._lax then
         rawset(t, k, v)
     else
@@ -183,6 +199,11 @@ function machine.create(options)
     state.current = state.current or options.initial or 'none'
     state.asyncState = state.asyncState or NONE
 
+    -- upvalues
+    haveWildcard = false
+    allStates = {}
+    allStates[state.current] = true
+
     state.events = state.events or options.events
 
     fsm.events = {}
@@ -193,6 +214,7 @@ function machine.create(options)
         add_event_handler_names(fsm._callbacks, name)
         add_to_map(fsm.events[name].map, fsm._callbacks, event)
     end
+    settle_wildcards(fsm._callbacks)
     setmetatable(fsm, machine)
 
     for name, callback in pairs(options.callbacks or {}) do
@@ -247,6 +269,7 @@ function machine:transition(event)
     if self._state.currentTransitioningEvent == event then
         return self[self._state.currentTransitioningEvent](self)
     end
+    return false
 end
 
 function machine:cancelTransition(event)
