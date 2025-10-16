@@ -1,3 +1,29 @@
+-- https://github.com/kyleconroy/lua-state-machine
+
+-- Copyright (c) 2012 Kyle Conroy
+-- Copyright (c) 2025 t0suj4
+--
+-- Permission is hereby granted, free of charge, to any person obtaining a copy
+-- of this software and associated documentation files (the "Software"), to deal
+-- in the Software without restriction, including without limitation the rights
+-- to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+-- copies of the Software, and to permit persons to whom the Software is
+-- furnished to do so, subject to the following conditions:
+--
+-- The above copyright notice and this permission notice shall be included in all
+-- copies or substantial portions of the Software.
+--
+-- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+-- IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+-- FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+-- AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+-- LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+-- OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+-- SOFTWARE.
+
+
+local serpent = require("serpent")
+
 local machine = {}
 machine.__index = machine
 
@@ -7,151 +33,227 @@ local ASYNC = "async"
 -- Compatibility for Lua 5.1 vs 5.2+
 local unpack = unpack or table.unpack
 
-local function call_handler(handler, params)
-  if handler then
-    return handler(unpack(params))
-  end
+local function call_handler(handler, machine, params)
+    if handler then
+        return handler(machine, unpack(params))
+    end
 end
 
 local function create_transition(name)
-  local can, to, from, params
+    local onbefore, onafter, onevent = "onbefore" .. name, "onafter" .. name, "on" .. name
+    local waitingonleave, waitingonenter = name .. "WaitingOnLeave", name .. "WaitingOnEnter"
+    local function transition(self, ...)
+        local state = self._state
+        if state.asyncState == NONE then
+            local can, to = self:can(name)
+            local from = state.current
+            if not can then return false end
+            state.to = to
 
-  local function transition(self, ...)
-    if self.asyncState == NONE then
-      can, to = self:can(name)
-      from = self.current
-      params = { self, name, from, to, ...}
+            state.params = { name, from, to, ...}
+            state.currentTransitioningEvent = name
 
-      if not can then return false end
-      self.currentTransitioningEvent = name
+            local beforeReturn = call_handler(self[onbefore], self, state.params)
+            local leaveReturn = call_handler(self["onleave" .. from], self, state.params)
 
-      local beforeReturn = call_handler(self["onbefore" .. name], params)
-      local leaveReturn = call_handler(self["onleave" .. from], params)
+            if beforeReturn == false or leaveReturn == false then
+                return false
+            end
 
-      if beforeReturn == false or leaveReturn == false then
+            state.asyncState = waitingonleave
+
+            if leaveReturn ~= ASYNC then
+                transition(self, ...)
+            end
+
+            return true
+        elseif state.asyncState == waitingonleave then
+            local to = state.to
+            state.current = to
+
+            local enterReturn = call_handler(self["onenter" .. to], self, state.params)
+
+            state.asyncState = waitingonenter
+
+            if enterReturn ~= ASYNC then
+                transition(self, ...)
+            end
+
+            return true
+        elseif state.asyncState == waitingonenter then
+            call_handler(self[onafter], self, state.params)
+            call_handler(self["onstatechange"], self, state.params)
+            state.asyncState = NONE
+            state.currentTransitioningEvent = nil
+            return true
+        else
+            if string.find(state.asyncState, "WaitingOnLeave") or string.find(state.asyncState, "WaitingOnEnter") then
+                state.asyncState = NONE
+                transition(self, ...)
+                return true
+            end
+        end
+
+        state.currentTransitioningEvent = nil
         return false
-      end
-
-      self.asyncState = name .. "WaitingOnLeave"
-
-      if leaveReturn ~= ASYNC then
-        transition(self, ...)
-      end
-      
-      return true
-    elseif self.asyncState == name .. "WaitingOnLeave" then
-      self.current = to
-
-      local enterReturn = call_handler(self["onenter" .. to] or self["on" .. to], params)
-
-      self.asyncState = name .. "WaitingOnEnter"
-
-      if enterReturn ~= ASYNC then
-        transition(self, ...)
-      end
-      
-      return true
-    elseif self.asyncState == name .. "WaitingOnEnter" then
-      call_handler(self["onafter" .. name] or self["on" .. name], params)
-      call_handler(self["onstatechange"], params)
-      self.asyncState = NONE
-      self.currentTransitioningEvent = nil
-      return true
-    else
-    	if string.find(self.asyncState, "WaitingOnLeave") or string.find(self.asyncState, "WaitingOnEnter") then
-    		self.asyncState = NONE
-    		transition(self, ...)
-    		return true
-    	end
     end
 
-    self.currentTransitioningEvent = nil
-    return false
-  end
-
-  return transition
+    return transition
 end
 
-local function add_to_map(map, event)
-  if type(event.from) == 'string' then
-    map[event.from] = event.to
-  else
-    for _, from in ipairs(event.from) do
-      map[from] = event.to
+function add_handler(t, info, handler, overwrite)
+    local name = info
+    if t[name] ~= nil and not overwrite then
+        error("Attempted to overwrite event handler: " .. name)
     end
-  end
+    rawset(t, name, handler)
+end
+
+function add_event_handler_names(t, name)
+    t["onbefore" .. name] = "onbefore" .. name
+    t["onafter" .. name] = "onafter" .. name
+    t["on" .. name] = "onafter" .. name
+end
+
+function add_from_handler_names(t, from)
+    t["onleave" .. from] = "onleave" .. from
+end
+
+function add_to_handler_names(t, to)
+    t["onenter" .. to] = "onenter" .. to
+    t["on" .. to] = "onenter" .. to
+end
+
+local function add_to_map(map, callbacknames, event)
+    if type(event.from) == 'string' then
+        map[event.from] = event.to
+        add_from_handler_names(callbacknames, event.from)
+    else
+        for _, from in ipairs(event.from) do
+            map[from] = event.to
+            add_from_handler_names(callbacknames, from)
+        end
+    end
+    add_to_handler_names(callbacknames, event.to)
+end
+
+function is_callable_or_nil(v)
+    local t = type(v)
+    if t == "function" or t == "nil" then
+        return true, t
+    elseif t == "table" then
+        mt = getmetatable(v)
+        if type(mt.__call) == "function" then
+            return true, t
+        end
+    end
+    return false, t
+end
+
+function machine.__newindex(t, k, v)
+    if t._sealed then
+        error("Cannot modify sealed object")
+    end
+    local cbinfo = t._callbacks[k]
+    if cbinfo then
+        local valid, typ = is_callable_or_nil(v)
+        if not valid then
+            error("Unexpected handler: " .. k .. " type: " .. typ)
+        end
+	add_handler(t, cbinfo, v, t._lax)
+    elseif t._lax then
+        rawset(t, k, v)
+    else
+        error("No valid callback named: " .. k)
+    end
 end
 
 function machine.create(options)
-  assert(options.events)
+    assert(options.events)
 
-  local fsm = {}
-  setmetatable(fsm, machine)
+    local fsm = {}
 
-  fsm.options = options
-  fsm.current = options.initial or 'none'
-  fsm.asyncState = NONE
-  fsm.events = {}
+    local state = options.state or {}
+    fsm._state = state
+    fsm._options = options
+    fsm._callbacks = {onstatechange = "onstatechange"}
+    fsm._lax = options.lax or false
+    fsm._sealed = false
 
-  for _, event in ipairs(options.events or {}) do
-    local name = event.name
-    fsm[name] = fsm[name] or create_transition(name)
-    fsm.events[name] = fsm.events[name] or { map = {} }
-    add_to_map(fsm.events[name].map, event)
-  end
-  
-  for name, callback in pairs(options.callbacks or {}) do
-    fsm[name] = callback
-  end
+    state.current = state.current or options.initial or 'none'
+    state.asyncState = state.asyncState or NONE
 
-  return fsm
+    state.events = state.events or options.events
+
+    fsm.events = {}
+    for _, event in ipairs(state.events or {}) do
+        local name = event.name
+        fsm[name] = fsm[name] or create_transition(name)
+        fsm.events[name] = fsm.events[name] or { map = {} }
+        add_event_handler_names(fsm._callbacks, name)
+        add_to_map(fsm.events[name].map, fsm._callbacks, event)
+    end
+    setmetatable(fsm, machine)
+
+    for name, callback in pairs(options.callbacks or {}) do
+        fsm[name] = callback
+    end
+    if options.seal then
+        fsm:seal()
+    end
+
+    return fsm
+end
+
+function machine:seal()
+    self._sealed = true
+    self._callbacks = nil
 end
 
 function machine:is(state)
-  return self.current == state
+    return self._state.current == state
 end
 
 function machine:can(e)
-  local event = self.events[e]
-  local to = event and event.map[self.current] or event.map['*']
-  return to ~= nil, to
+    local event = self.events[e]
+    local to = event and event.map[self._state.current] or event.map['*']
+    return to ~= nil, to
 end
 
 function machine:cannot(e)
-  return not self:can(e)
+    return not self:can(e)
 end
 
-function machine:todot(filename)
-  local dotfile = io.open(filename,'w')
-  assert(dotfile~=nil)
-  dotfile:write('digraph {\n')
-  local transition = function(event,from,to)
-    dotfile:write(string.format('%s -> %s [label=%s];\n',from,to,event))
-  end
-  for _, event in pairs(self.options.events) do
-    if type(event.from) == 'table' then
-      for _, from in ipairs(event.from) do
-        transition(event.name,from,event.to)
-      end
-    else
-      transition(event.name,event.from,event.to)
+function machine:todot()
+    local text = {}
+    table.insert(text, 'digraph {\n')
+    local transition = function(event,from,to)
+        table.insert(text, string.format('%s -> %s [label=%s];\n',from,to,event))
     end
-  end
-  dotfile:write('}\n')
-  dotfile:close()
+    for _, event in pairs(self._options.events) do
+        if type(event.from) == 'table' then
+            for _, from in ipairs(event.from) do
+                transition(event.name,from,event.to)
+            end
+        else
+            transition(event.name,event.from,event.to)
+        end
+    end
+    table.insert(text, '}\n')
+    return table.concat(text)
 end
 
 function machine:transition(event)
-  if self.currentTransitioningEvent == event then
-    return self[self.currentTransitioningEvent](self)
-  end
+    if self._state.currentTransitioningEvent == event then
+        return self[self._state.currentTransitioningEvent](self)
+    end
 end
 
 function machine:cancelTransition(event)
-  if self.currentTransitioningEvent == event then
-    self.asyncState = NONE
-    self.currentTransitioningEvent = nil
-  end
+    if self._state.currentTransitioningEvent == event then
+        self._state.asyncState = NONE
+        self._state.currentTransitioningEvent = nil
+    end
 end
 
 machine.NONE = NONE
