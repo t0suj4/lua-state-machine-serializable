@@ -128,7 +128,7 @@ local haveWildcard
 
 --- @param t table<string, string>
 --- @param name string
-function add_event_handler_names(t, name)
+local function add_event_handler_names(t, name)
     t["onbefore" .. name] = "onbefore" .. name
     t["onafter" .. name] = "onafter" .. name
     t["on" .. name] = "onafter" .. name
@@ -136,7 +136,7 @@ end
 
 --- @param t table<string, string>
 --- @param from string
-function add_from_handler_names(t, from)
+local function add_from_handler_names(t, from)
     if from == "*" then
         haveWildcard = true
     else
@@ -147,14 +147,14 @@ end
 
 --- @param t table<string, string>
 --- @param to string
-function add_to_handler_names(t, to)
+local function add_to_handler_names(t, to)
     allStates[to] = true
     t["onenter" .. to] = "onenter" .. to
     t["on" .. to] = "onenter" .. to
 end
 
 --- @param t table<string, string>
-function settle_wildcards(t)
+local function settle_wildcards(t)
     if haveWildcard then
         for k in pairs(allStates) do
             t["onleave" .. k] = "onleave" .. k
@@ -179,7 +179,7 @@ local function add_to_map(map, callbacknames, event)
 end
 
 --- @param v any
-function is_callable_or_nil(v)
+local function is_callable_or_nil(v)
     local t = type(v)
     if t == "function" or t == "nil" then
         return true, t
@@ -212,6 +212,7 @@ function machine.__newindex(t, k, v)
     end
 end
 
+-- luacheck: push ignore
 ---@class EventDefinition
 ---@field name string Event name
 ---@field from string|string[] States the event transitions from or "*" for any state
@@ -232,6 +233,7 @@ local _
 ---@field public lax boolean|nil default false, True will allow storing data on the machine object and replacing callbacks
 ---@field public seal boolean|nil default false, True will prevent any modifications
 local _
+-- luacheck: pop
 
 ---@alias EventTriggers table<string, fun(self: self, ...: AnySerializableType)>
 
